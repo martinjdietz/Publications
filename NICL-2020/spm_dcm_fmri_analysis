@@ -1,0 +1,183 @@
+
+% 1. First-level analysis of fMRI data
+% ----------------------------------------------------------------
+
+inputs{1} = D; % raw data (DICOM: *.dcm)
+inputs{2} = P; % analysis directory 
+inputs{3} = R; % results directory
+inputs{4} = C; % multiple conditions file (*.mat)
+
+spm('defaults','fmri');
+spm_jobman('initcfg');
+spm_get_defaults('cmdline',true);
+
+% load first-level analysis batch
+load ffx.mat
+
+spm_jobman('serial', matlabbatch, '', inputs{:});
+
+
+% 2. Second-level analysis of fMRI data
+% ----------------------------------------------------------------
+
+% Use Second-level models in SPM as usual as described in the SPM manual
+
+
+% 3. VOI: 1st eigenvariate
+% ----------------------------------------------------------------
+
+spm('defaults','fmri');
+spm_get_defaults('cmdline',true);
+
+
+% results directory
+Rdir = 'full/path/to/first-level/result'; % single-subject
+
+% regions
+region{1}     = 'V5';
+mni{1} = [46 -68 0];
+
+region{2}     = 'pSTS';
+mni{2} = [54 -54 14];
+
+Nr = length(region);
+
+% load VOI extraction batch
+load voi.mat
+
+for j = 1:Nr
+
+    D{1} = fullfile(Rdir,'SPM.mat');
+
+    matlabbatch{1}.spm.util.voi.spmmat  = D;
+    matlabbatch{1}.spm.util.voi.adjust  = 1;
+    matlabbatch{1}.spm.util.voi.session = 1;
+    matlabbatch{1}.spm.util.voi.name    = region{j};
+
+    matlabbatch{1}.spm.util.voi.roi{1}.spm.contrast = 1;
+    matlabbatch{1}.spm.util.voi.roi{1}.spm.threshdesc = 'none';
+    matlabbatch{1}.spm.util.voi.roi{1}.spm.thresh = 0.05;
+    matlabbatch{1}.spm.util.voi.roi{1}.spm.extent = 0;
+
+    % Radius of outer sphere, fixed across subjects (mm)
+
+    matlabbatch{1}.spm.util.voi.roi{2}.sphere.centre = mni{j};
+    matlabbatch{1}.spm.util.voi.roi{2}.sphere.radius = 20;
+
+    % Radius of the inner sphere, moves across subjects (mm)
+
+    matlabbatch{1}.spm.util.voi.roi{3}.sphere.centre = mni{j};
+    matlabbatch{1}.spm.util.voi.roi{3}.sphere.radius = 8; 
+
+    spm_jobman('run',matlabbatch);
+end
+
+
+% 4. DCM for fMRI
+% ----------------------------------------------------------------
+
+spm('defaults','fmri');
+spm_get_defaults('cmdline',true);
+
+% results directory
+Rdir = 'full/path/to/VOIs'; % single-subject
+
+% regions
+region = {'V5' 'pSTS'};
+Nr = length(region);
+
+% model space
+Nm = 4;
+
+for j = 1:Nm
+    
+    % full DCM
+    clear DCM
+
+    DCM.a = [];
+    DCM.b = [];
+    DCM.c = [];
+    DCM.d = [];
+
+    % A-matrix
+    % -----------------------
+
+    DCM.a = ones(Nr); 
+      
+    % B-matrix (Nr,Nr,k)
+    % -----------------------
+    
+    DCM.b(:,:,1) = zeros(Nr);
+    DCM.b(:,:,2) = zeros(Nr);    
+    
+    if j == 1
+        DCM.b(:,:,2) = ones(Nr); 
+    end
+    
+    if j == 2
+        DCM.b(2,1,2) = 1;   
+        DCM.b(1,2,2) = 1; 
+    end
+    
+    if j == 3
+        DCM.b(2,1,2) = 1; 
+    end
+    
+    % C-matrix (Nr,k)
+    % --------------------------------
+
+    DCM.c =  zeros(2,2); % input to V5
+    DCM.c(1,1) = 1;
+    
+    % model settings
+
+    DCM.TE = 27/1e3;
+    DCM.n = Nr;
+    DCM.delays = ones(Nr,1);
+
+    DCM.options.nonlinear  = 0;
+    DCM.options.two_state  = 1;
+    DCM.options.stochastic = 0;
+    DCM.options.centre     = 1;
+    DCM.options.nograph    = 1;
+
+    if DCM.options.nonlinear == 1
+        for i = 1:Nr
+            DCM.d(:,:,i) = ((eye(Nr)*-1) + ones(Nr));
+        end
+    else
+        for i = 1:Nr
+            DCM.d(:,:,i) = zeros(Nr);
+        end
+    end
+
+    % model inversion
+
+    cd(Rdir)
+
+    for r = 1:Nr
+        VOI{r,1} = fullfile(R,sprintf('VOI_%s_1.mat',region{r}));
+    end
+
+    DCM = spm_dcm_voi(DCM,VOI);
+    DCM = spm_dcm_U(DCM,fullfile(R,'SPM.mat'),1,{[1 1]});
+
+    if j == 1
+        DCM = spm_dcm_estimate(DCM);
+    end
+
+    % save
+
+    save(sprintf('DCM_%d_%d',n,j),'DCM')
+end
+
+
+% 5. PEB group analysis
+% ----------------------------------------------------------------
+
+% Use Bayesian model reduction (BMR) and Parametric empirical Bayes (PEB)
+% to peform model comparison at the group level and test hypotheses about 
+% changes in connection strengths within groups and differences between
+% groups, as described here:
+
+% https://en.wikibooks.org/wiki/SPM/Parametric_Empirical_Bayes_(PEB)
